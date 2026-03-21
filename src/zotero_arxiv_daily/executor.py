@@ -2,7 +2,7 @@ from loguru import logger
 from pyzotero import zotero
 from omegaconf import DictConfig, ListConfig
 from .utils import glob_match
-from .retriever import get_retriever_cls
+from .retriever import get_retriever_cls, registered_retrievers
 from .protocol import CorpusPaper
 import random
 from datetime import datetime
@@ -33,8 +33,21 @@ class Executor:
     def __init__(self, config:DictConfig):
         self.config = config
         self.include_path_patterns = normalize_include_path_patterns(config.zotero.include_path)
+        source_list = config.executor.source
+        if source_list is None:
+            source_list = [
+                name for name in registered_retrievers
+                if getattr(config.source, name, None) is not None
+                and getattr(config.source, name).category is not None
+            ]
+            if not source_list:
+                raise ValueError(
+                    "No paper sources configured. Either set executor.source explicitly, "
+                    "or configure at least one source (e.g. source.arxiv.category) in your config."
+                )
+            logger.info(f"Auto-detected sources from config: {source_list}")
         self.retrievers = {
-            source: get_retriever_cls(source)(config) for source in config.executor.source
+            source: get_retriever_cls(source)(config) for source in source_list
         }
         self.reranker = get_reranker_cls(config.executor.reranker)(config)
         self.openai_client = OpenAI(api_key=config.llm.api.key, base_url=config.llm.api.base_url)
