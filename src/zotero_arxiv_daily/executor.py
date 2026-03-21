@@ -14,8 +14,11 @@ from tqdm import tqdm
 class Executor:
     def __init__(self, config:DictConfig):
         self.config = config
+        sources = config.executor.source
+        if sources is None:
+            sources = [s for s in config.source if config.source[s].get("category") is not None]
         self.retrievers = {
-            source: get_retriever_cls(source)(config) for source in config.executor.source
+            source: get_retriever_cls(source)(config) for source in sources
         }
         self.reranker = get_reranker_cls(config.executor.reranker)(config)
         self.openai_client = OpenAI(api_key=config.llm.api.key, base_url=config.llm.api.base_url)
