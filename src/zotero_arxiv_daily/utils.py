@@ -108,11 +108,19 @@ def send_email(config:DictConfig, html:str):
     today = datetime.datetime.now().strftime('%Y/%m/%d')
     msg['Subject'] = Header(f'Daily arXiv {today}', 'utf-8').encode()
 
+    server = None
     try:
+        if smtp_port == 465:
+            raise ValueError("Port 465 uses implicit SSL, skipping STARTTLS")
         server = smtplib.SMTP(smtp_server, smtp_port)
         server.starttls()
     except Exception as e:
-        logger.debug(f"Failed to use TLS. {e}\nTry to use SSL.")
+        logger.debug(f"Failed to use STARTTLS. {e}\nTry to use SSL.")
+        if server is not None:
+            try:
+                server.close()
+            except Exception:
+                pass
         try:
             server = smtplib.SMTP_SSL(smtp_server, smtp_port)
         except Exception as e:
