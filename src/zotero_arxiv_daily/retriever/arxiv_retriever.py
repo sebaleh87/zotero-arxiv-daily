@@ -8,7 +8,6 @@ import feedparser
 from tqdm import tqdm
 import multiprocessing
 import os
-import re
 from queue import Empty
 from time import sleep
 from typing import Any, Callable, TypeVar
@@ -124,47 +123,34 @@ class ArxivRetriever(BaseRetriever):
             raise Exception(f"Invalid ARXIV_QUERY: {query}.")
         raw_papers = []
         allowed_announce_types = {"new", "cross"} if include_cross_list else {"new"}
-        entries = [
-            i for i in feed.entries
+        all_paper_ids = [
+            i.id.removeprefix("oai:arXiv.org:")
+            for i in feed.entries
             if i.get("arxiv_announce_type", "new") in allowed_announce_types
         ]
         if self.config.executor.debug:
-            entries = entries[:10]
-        all_paper_ids = [i.id.removeprefix("oai:arXiv.org:") for i in entries]
+            all_paper_ids = all_paper_ids[:10]
 
-        # Get full information of each paper from arxiv api. If the API keeps
-        # failing (e.g. HTTP 406 when export.arxiv.org throttles CI runners),
-        # fall back to the metadata already present in the RSS feed.
+        # Get full information of each paper from arxiv api
         bar = tqdm(total=len(all_paper_ids))
         max_batch_retries = 5
         batch_retry_delay = 30
-        use_api = True
         for i in range(0, len(all_paper_ids), 20):
-            batch_entries = entries[i:i + 20]
-            if use_api:
-                search = arxiv.Search(id_list=all_paper_ids[i:i + 20])
-                for attempt in range(max_batch_retries):
-                    try:
-                        batch = list(client.results(search))
-                        break
-                    except arxiv.HTTPError as exc:
-                        if exc.status == 429 and attempt < max_batch_retries - 1:
-                            wait = batch_retry_delay * (attempt + 1)
-                            logger.warning(f"arXiv API 429 on batch {i // 20}, retry {attempt + 1}/{max_batch_retries} in {wait}s")
-                            sleep(wait)
-                        else:
-                            logger.warning(f"arXiv API failed on batch {i // 20} ({exc}); using RSS metadata for the remaining papers")
-                            use_api = False
-                            break
-                    except requests.exceptions.RequestException as exc:
-                        logger.warning(f"arXiv API failed on batch {i // 20} ({exc}); using RSS metadata for the remaining papers")
-                        use_api = False
-                        break
-            if not use_api:
-                batch = [_result_from_rss_entry(e) for e in batch_entries]
-            bar.update(len(batch))
-            raw_papers.extend(batch)
-            if use_api and i + 20 < len(all_paper_ids):
+            search = arxiv.Search(id_list=all_paper_ids[i:i + 20])
+            for attempt in range(max_batch_retries):
+                try:
+                    batch = list(client.results(search))
+                    bar.update(len(batch))
+                    raw_papers.extend(batch)
+                    break
+                except arxiv.HTTPError as exc:
+                    if exc.status == 429 and attempt < max_batch_retries - 1:
+                        wait = batch_retry_delay * (attempt + 1)
+                        logger.warning(f"arXiv API 429 on batch {i // 20}, retry {attempt + 1}/{max_batch_retries} in {wait}s")
+                        sleep(wait)
+                    else:
+                        raise
+            if i + 20 < len(all_paper_ids):
                 sleep(3)
         bar.close()
 
@@ -189,26 +175,6 @@ class ArxivRetriever(BaseRetriever):
             pdf_url=pdf_url,
             full_text=full_text,
         )
-
-
-def _result_from_rss_entry(entry) -> ArxivResult:
-    paper_id = entry.id.removeprefix("oai:arXiv.org:")
-    authors = [a.strip() for a in entry.get("author", "").split(",") if a.strip()]
-    # RSS summaries look like "arXiv:2508.13426v1 Announce Type: new \nAbstract: ..."
-    summary = re.sub(r"^arXiv:\S+\s+Announce Type:.*?Abstract:\s*", "", entry.get("summary", ""), count=1, flags=re.S)
-    categories = [t.term for t in entry.get("tags", [])]
-    return ArxivResult(
-        entry_id=f"http://arxiv.org/abs/{paper_id}",
-        title=entry.title,
-        authors=[ArxivResult.Author(a) for a in authors],
-        summary=summary.strip(),
-        primary_category=categories[0] if categories else "",
-        categories=categories,
-        links=[
-            ArxivResult.Link(f"http://arxiv.org/abs/{paper_id}", rel="alternate", content_type="text/html"),
-            ArxivResult.Link(f"http://arxiv.org/pdf/{paper_id}", title="pdf", rel="related", content_type="application/pdf"),
-        ],
-    )
 
 
 def extract_text_from_html(paper: ArxivResult) -> str | None:
