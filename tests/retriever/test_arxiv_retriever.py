@@ -88,3 +88,51 @@ def test_run_with_hard_timeout_returns_none_on_failure(monkeypatch):
     )
     assert result is None
     assert "boom" in warnings[0]
+
+
+def test_arxiv_retriever_falls_back_to_rss_on_api_error(config, mock_feedparser, monkeypatch):
+    monkeypatch.setattr("zotero_arxiv_daily.retriever.base.sleep", lambda _: None)
+    monkeypatch.setattr(arxiv_retriever, "sleep", lambda _: None)
+
+    new_entries = [
+        e for e in mock_feedparser.entries
+        if e.get("arxiv_announce_type", "new") == "new"
+    ]
+    calls = []
+
+    class FailingClient:
+        def __init__(self, **kw):
+            pass
+        def results(self, search):
+            calls.append(search)
+            raise arxiv_retriever.arxiv.HTTPError("https://export.arxiv.org/api/query", 10, 406)
+
+    monkeypatch.setattr(arxiv_retriever.arxiv, "Client", FailingClient)
+    monkeypatch.setattr(arxiv_retriever, "extract_text_from_html", lambda paper: None)
+    monkeypatch.setattr(arxiv_retriever, "extract_text_from_pdf", lambda paper: None)
+    monkeypatch.setattr(arxiv_retriever, "extract_text_from_tar", lambda paper: None)
+
+    retriever = ArxivRetriever(config)
+    papers = retriever.retrieve_papers()
+
+    assert len(calls) == 1  # 406 is not retried at the batch level
+    assert len(papers) == len(new_entries)
+    assert set(p.title for p in papers) == set(e.title for e in new_entries)
+    for paper in papers:
+        assert paper.authors
+        assert paper.abstract and not paper.abstract.startswith("arXiv:")
+        assert paper.pdf_url.startswith("http://arxiv.org/pdf/")
+
+
+def test_result_from_rss_entry(mock_feedparser):
+    entry = mock_feedparser.entries[0]
+    result = arxiv_retriever._result_from_rss_entry(entry)
+
+    assert result.entry_id == "http://arxiv.org/abs/2508.13426v1"
+    assert result.get_short_id() == "2508.13426v1"
+    assert result.title == entry.title
+    assert [a.name for a in result.authors] == ["Chunhua Liu", "Kabir Manandhar Shrestha", "Sukai Huang"]
+    assert result.summary.startswith("As large language models (LLMs)")
+    assert result.pdf_url == "http://arxiv.org/pdf/2508.13426v1"
+    assert result.source_url() == "http://arxiv.org/src/2508.13426v1"
+    assert result.categories == ["cs.CL", "cs.AI"]
